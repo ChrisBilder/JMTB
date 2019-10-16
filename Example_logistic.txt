@@ -1,0 +1,114 @@
+
+## Load necessary packages and source files ##
+library(mvtnorm)
+library(truncnorm)
+library(Rcpp)
+source("GT_mixedmodel_Dirac.txt")
+
+J = 50		## number of sites
+c = 4		## pool size
+N = 5000		## number of individuals
+
+## Create Dorfman decoding algorithm -- this simulates	##
+## a group testing data set from Dorfman's algorithm	##
+Dorfman.decode.diff.error<-function(Y.true,Se,Sp,cj){
+	N<-length(Y.true)
+	Jmax<-N+N/cj
+	J<-1
+
+	Y<-matrix(-99,nrow=N, ncol=4)
+	Z<-matrix(-99,nrow=Jmax,ncol=cj+3)
+
+
+	for(j in 1:(N/cj)){
+		prob<-ifelse(sum(Y.true[((j-1)*cj+1):(j*cj)])>0,Se[1],1-Sp[1])
+		Z[J,1]<-rbinom(n=1,size=1,prob=prob)
+		Z[J,2]<-cj
+		Z[J,3]<-1
+		Z[J,4:(cj+3)]<-((j-1)*cj+1):(j*cj)
+		Y[((j-1)*cj+1):(j*cj),2]<-1
+		Y[((j-1)*cj+1):(j*cj),3]<-J
+		J<-J+1
+		if(Z[J-1,1]==1){
+			for(k in ((j-1)*cj+1):(j*cj)){
+				prob<-ifelse(Y.true[k]>0,Se[2],1-Sp[2])
+				Z[J,1]<- rbinom(n=1,size=1,prob=prob)
+				Z[J,2]<-1
+				Z[J,3]<-2
+				Z[J,4]<-k
+				Y[k,2]<-2
+				Y[k,4]<-J
+				J<-J+1
+			}
+		}
+	}
+
+	J<-J-1
+	Z<-Z[1:J,]
+
+	return(list("Z"=Z, "Y"=Y))
+}
+
+
+## True parameter values ##
+Se.true = c(0.95,0.98)
+Sp.true = c(0.98,0.99)
+beta.true = c(-3, -1.5, 0.5, 0.25)
+lambda.true = c(1, 0.75, 0.25)
+V.true = diag(lambda.true)
+A.true = diag(3)
+A.true[lower.tri(A.true)] = c(1, 0.5, 0.7)
+D.true = V.true %*% A.true %*% t(A.true) %*% V.true
+b.true = t(rmvnorm(J, rep(0, 3), diag(3)))
+
+## Generate covariates, where X is covariates for fixed effects	##
+## and Z is covariates for random effects			##
+x1 = rnorm(N, 0, 1)
+x2 = rbinom(N, 1, 0.5)
+x3 = rbinom(N, 1, 0.5)
+X = cbind(x1, x2, x3)
+Z = X[,-3]
+Xstd = t((t(X) - apply(X, 2, mean)) / apply(X, 2, sd))
+Zstd = t((t(Z) - apply(Z, 2, mean)) / apply(Z, 2, sd))
+X = cbind(1, Xstd)
+Z = cbind(1, Zstd)
+
+## Generate individuals' true statuses ##
+Y.true = rep(-99, N)
+sid = sample(1:J, N, replace = TRUE)	## site id for each individual
+for(i in 1:N){
+		exb = exp(X[i,] %*% beta.true + Z[i,] %*% diag(lambda.true) %*% A.true %*% b.true[,sid[i]])
+                prob = exb / (1 + exb)
+                Y.true[i] = rbinom(1, 1, prob)
+}
+
+## Perform Dorfman group testing ##
+group_data =  Dorfman.decode.diff.error(Y.true,Se.true,Sp.true,c)
+G = group_data$Z
+Y = group_data$Y
+Y = cbind(Y[,1:2],sid,Y[,3:4])	## adds site id
+Y[,1] = Y.true		## initializes as diagnose status
+
+## Add insignificant covariates to stress test model ##
+Xi = cbind(rbinom(N, 1, 0.5), rnorm(N))
+Xistd = t((t(Xi) - apply(Xi, 2, mean)) / apply(Xi, 2, sd))
+Xstd = cbind(X, Xistd)
+
+## Run model ##
+res = GT_mixedmodel_Dirac(G, Y, X = Xstd, Z = Xstd, Se.true, Sp.true, est.error = TRUE, link = "logistic")
+
+## Analyze results using last half of MCMC chain ##
+range = 1001:2000
+
+beta.est = apply(res$beta[,range], 1, mean)	## beta posterior mean estimate
+beta.sd.est = apply(res$beta[,range], 1, sd)	## beta posterior standard deviation estimate
+beta.PI = apply(res$v[,range], 1, mean)		## posterior probability of inclusion
+
+lambda.est = apply(res$lambda[,range], 1, mean)	## lambda posterior mean estimate
+lambda.sd.est = apply(res$lambda[,range], 1, sd)	## lambda posterior standard deviation estimate
+lambda.PI = apply(res$w[,range], 1, mean)	## posterior probability of inclusion
+
+D.est = apply(res$D[,,range], c(1,2), mean)	## D matrix posterior mean estimate
+D.sd.est = apply(res$D[,,range], c(1,2), sd)	## D matrix posterior standard deviation estimate
+
+

@@ -1,0 +1,19 @@
+This folder contains the necessary code to implement the proposed methodology.
+
+For the logistic link, it is necessary to install the BayesLogit package in R. This package is no longer available
+for download from CRAN, so we have provided the source files (BayesLogit_0.6.tar) for installation.
+
+The subfolder (Chlamydia data) contains files that creates a fake chlamydia data set (Create_Fake_Data_Set.txt),
+which is saved as (GT_Chlamydia_Data.csv), to mimic the Iowa group testing data set, and the necessary data 
+structuring code and runs a complete analysis of the data set (Data_Analysis.txt).
+
+Also included is two examples files, one for probit link (Example_probit.txt) and one for logistic link
+(Example_logistic.txt), which simulates data from Dorfman's group testing algorithm and uses 
+the Dirac spike code (GT_mixedmodel_Dirac.txt) to perform model fitting.
+
+For the example code, i.e., 5000 individuals and Dorfman's group testing algorithm, the approximate time for model fitting is
+	- 3.75 hours for Dirac spike
+	- 3.25 hours for SSVS and NMIG
+The computer specifications for these approximations are:
+	- CPU: Intel Pentium G3240 @ 3.10 GHz
+	- RAM: 4 GB DDR3

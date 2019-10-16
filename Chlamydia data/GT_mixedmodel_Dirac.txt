@@ -1,0 +1,288 @@
+###############################################################################################
+###############################################################################################
+#####
+#####	R function: This function fits a probit (logistic) model with Dirac spike to group testing data according to the
+#####		  Bayesian methods discussed in Joyner et al.
+#####
+#####	Inputs:
+#####	G = matrix of testing responses with jth row of form (col1 = response, col2 = pool size cj, col3 = assay used,
+#####	       col4:col(4+cj-1) = indices of individuals assigned to that pool
+#####	Y = matrix whose ith row is of the form (col1 = status, col2 = number of pools that individual is involved in, 
+#####	       col3 = site visited, col4:col(4+col2) = pools individual was in
+#####	X = covariate matrix for fixed effects
+#####	Z = covariate matrix for random effects
+#####	Se = vector of sensitivity values, if known
+#####	Sp = vector of specificity values, if known
+#####	link = specify link being used (probit or logistic)
+#####	thin = thinning parameter value
+#####	iters = number of Gibbs iterates
+#####	est.error = logical; FALSE means to use known Se and Sp to fit model, TRUE means estimate Se and Sp also
+#####	verbose = logical; FALSE means to plot nothing, TRUE means to plot some values of Beta and Lambda during MCMC
+#####
+#####	Required packages:  mvtnorm, truncnorm, Rcpp, BayesLogit (for logistic link)
+#####	Additional software required:  Rtools for Windows (for Rcpp)
+#####
+###############################################################################################
+###############################################################################################
+
+GT_mixedmodel_Dirac = function(G, Y, X, Z, Se = NULL, Sp = NULL, link = "probit", thin = 50, iters = 100000, est.error = TRUE, verbose = FALSE){
+	
+	## Preliminaries ##
+	N = dim(Y)[1]			## number of individuals
+	J = length(unique(Y[,3]))		## number of sites
+	K = dim(G)[1]			## number of groups
+	lb = dim(X)[2]
+	q = dim(Z)[2]
+	na = length(unique(G[,3]))
+	count = 1
+
+	## Set link function ##
+	if(link == "probit"){
+		ilink = function(u){
+			val = pnorm(u)
+			return(val)
+		}
+	}
+	if(link == "logistic"){
+		library(BayesLogit)
+		ilink = function(u){
+			exb = exp(u)
+			val = exb / (1 + exb)
+			return(val)
+		}
+	}
+
+	## Likelihood function with beta integrated out ##
+	like_v = function(v,ell){
+		if(all(v == 0)){
+			lval = 0
+			return(lval)
+		}
+		id = which(v == 1)
+		lid = length(id)
+		Xa = X[,id]
+		Sigma = t(Xa*omega) %*% Xa + diag(lid) / cb
+		mu = solve(Sigma) %*% t(Xa*omega) %*% (h - ZVAb)
+		lval = -(1/2) * log(det(Sigma)) + (1/2) * t(mu) %*% Sigma %*% mu - (1/2) * log(cb) * v[ell]
+		return(lval)
+	}
+	
+	## Create site indentifier sets ##
+	Sj = matrix(-99, nrow = (N+1), ncol = J)
+	for(j in 1:J){
+		id = which(Y[,3] == j)
+		nj = length(id)
+		Sj[1:(nj+1),j] = c(nj, id)
+	}
+
+	## Load necessary C code ##
+	print("Loading necessary .cpp code")
+	Rcpp::sourceCpp("samplelatentstatuses.cpp")
+	Rcpp::sourceCpp("errorupdate.cpp")
+	Rcpp::sourceCpp("createZVAb.cpp")
+	Rcpp::sourceCpp("createZVb.cpp")
+	Rcpp::sourceCpp("createT.cpp")
+	Rcpp::sourceCpp("createU.cpp")
+	print("Starting MCMC")
+
+	## Hyperparameters ##
+	ase = asp = rep(1, na)
+	bse = bsp = rep(1, na)
+	m0 = rep(0, q*(q-1)/2)
+	C0 = 0.5*diag(q*(q-1)/2)
+	IC0 = solve(C0)
+	IC0m0 = IC0 %*% m0
+	cb = 50/4
+	atau = apsi = 1
+	btau = bpsi = 1
+	
+	## Initialize ##
+	beta = rep(1, lb)
+	lambda = rep(0.5, q)
+	V = diag(lambda)
+	A = diag(q)
+	A[lower.tri(A)] = 0.5
+	a = A[lower.tri(A)]
+	v = rep(1, lb)
+	w = rep(1, q)
+	b = matrix(0, nrow = q, ncol = J)
+	Lw = Up = rep(-99, N)
+	tau = rep(0.5, lb)
+	psi = rep(0.5, q)
+	T = matrix(0, N, q)
+	if(is.null(Se)){Se = rep(0.95,na)}
+	if(is.null(Sp)){Sp = rep(0.98,na)}
+	XB = X %*% beta
+
+	## Saving devices ##
+	Beta = matrix(-99, lb, iters / thin)
+	Lambda = matrix(-99, q, iters / thin)
+	aa = matrix(-99, q*(q-1)/2, iters / thin)
+	vv = matrix(-99, lb, iters / thin)
+	ww = matrix(-99, q, iters / thin)
+	bb = array(-99, c(q, J, iters / thin))
+	Ses = matrix(-99, na, iters / thin)
+	Sps = matrix(-99, na, iters / thin)
+	DD = array(-99, c(q, q, iters / thin))
+	Tau = matrix(-99, lb, iters / thin)
+	Psi = matrix(-99, q, iters / thin)
+
+	## Gibbs starts here ##
+	for(t in 1:iters){
+		
+		## Sample auxiliary h ##
+		if(link == "probit"){
+			Lw[Y[,1] == 1] = 0
+			Up[Y[,1] == 1] = Inf
+			Lw[Y[,1] == 0] = -Inf
+			Up[Y[,1] == 0] = 0
+			ZVA = Z %*% V %*% A
+			ZVAb = rep(0, N)
+			ZVAb = createZVAb(N, q, ZVAb, ZVA, Y, b)
+			h = rtruncnorm(N, a = Lw, b = Up, mean = X %*% beta + ZVAb, sd = 1)
+			omega = rep(1,N)
+		}
+		if(link == "logistic"){
+			ZVA = Z %*% V %*% A
+			ZVAb = rep(0, N)
+			ZVAb = createZVAb(N, q, ZVAb, ZVA, Y, b)
+			omega = rpg(N, 1, X %*% beta + ZVAb)
+			h = (Y[,1] - 1/2) / omega
+		}
+
+		## Sample v ##
+		mix = sample(1:lb, lb, replace = FALSE)
+		for(i in mix){
+			v[i] = 0
+			lp0 = like_v(v,i)
+			v[i] = 1
+			lp1 = like_v(v,i)
+			p0p1 = exp(lp0 - lp1)
+			prob = 1 / (1 + (1-tau[i]) / tau[i] * p0p1)
+			v[i] = rbinom(1, 1, prob)
+		}
+	
+		## Sample w ##
+		mix = sample(1:q, q, replace = FALSE)
+		for(i in mix){
+			## w = 0 ##
+			lp0 = 0
+			## w = 1 ##
+			hs = h - XB - T[,-i] %*% lambda[-i]
+			sigmasq = 1 / (sum(T[,i]^2) + 1/ cb)
+			mu = sigmasq * t(T[,i]) %*% hs
+			lp1 = (1/2)*mu^2/sigmasq + log(sqrt(sigmasq)) + log(1 - pnorm(-mu/sqrt(sigmasq))) - log(sqrt(cb) / 2)
+			p0p1 = exp(lp0 - lp1)
+			prob = 1 / (1 + (1-psi[i]) / psi[i] * p0p1)
+			w[i] = rbinom(1, 1, prob)
+		}
+
+		## Sample beta ##
+		idv1 = which(v == 1)
+		idv0 = which(v == 0)
+		lidv1 = length(idv1)
+		Xa = X[,idv1]
+		beta[idv0] = 0
+		if(sum(v)>0){
+			S = solve(t(Xa*omega) %*% Xa + diag(lidv1) / cb)
+			mu = S %*% t(Xa*omega) %*% (h - ZVAb)
+			beta[idv1] = as.vector(rmvnorm(1, mu, S, method = "svd"))
+		}
+		XB = X %*% beta
+
+		## Sample lambdas ##
+		T = matrix(0, ncol = q, nrow = N)
+               	T = createT(N, q, Z, Y, A, b, T)
+		idw1 = which(w == 1)
+		idw0 = which(w == 0)
+		lidw1 = length(idw1)
+		lambda[idw0] = 0
+               	mix = sample(idw1, lidw1, replace = FALSE)
+               	for(ell in mix){
+             	  	S = 1 / (sum(T[,ell]^2 * omega) + 1 / cb)
+               	   	mu = S * sum(T[,ell] * omega * (h - XB - T[,-ell] %*% lambda[-ell]))
+               	   	lambda[ell] = rtruncnorm(1, a = 0, b = Inf, mean = mu, sd = sqrt(S))
+               	}
+               	V = diag(lambda)
+
+		## Sample a ##
+		U = matrix(0, ncol = length(a), nrow = N)
+		U = createU(N, q, Z, Y, V, b, U)
+		ZV = Z %*% V
+		ZVb = rep(0, N)
+		ZVb = createZVb(N, q, ZVb, ZV, Y, b)
+		S = solve(IC0 + t(U*omega) %*% U)
+		mu = S %*% (t(U*omega) %*% (h - XB - ZVb) + IC0m0)
+		a = as.vector(rmvnorm(1, mu, S, method = "svd"))
+		A[lower.tri(A)] = a
+
+		## Sample b ##
+		mix = sample(1:J, J, replace = FALSE)
+		for(j in mix){
+			nj = Sj[1,j]
+			id = Sj[2:(nj+1),j]
+			Zsj = Z[id,]
+			tmp = Zsj %*% V %*% A
+			S = solve(t(tmp*omega[id])%*% tmp + diag(q))
+			mu = S %*% t(tmp*omega[id]) %*% (h - XB)[id]
+			b[,j] = as.vector(rmvnorm(1, mu, S, method = "svd"))
+		}
+
+		## Sample mixing weights ##
+		a1 = v + atau
+		b1 = 1 - v + btau
+		a2 = w + apsi
+		b2 = 1 - w + bpsi
+		tau = rbeta(lb, a1, b1)
+		psi = rbeta(q, a2, b2)
+
+		## Sample Se and Sp ##
+		if(est.error == TRUE){
+			PSe = matrix(0, nrow = na, ncol = 2)
+			PSp = matrix(0, nrow = na, ncol = 2)
+			res = errorupdates(N, K, Y, G, PSe, PSp, na)
+			Se.up = matrix(res$PSe, nrow = na, ncol = 2)
+			Sp.up = matrix(res$PSp, nrow = na, ncol = 2)
+			for(i in 1:na){
+				Se[i] = rbeta(1, ase[i] + Se.up[i,1], bse[i] + Se.up[i,2])
+				Sp[i] = rbeta(1, asp[i] + Sp.up[i,1], bsp[i] + Sp.up[i,2])
+			}
+		}
+
+		## Sample Y ##
+                ZVA = Z %*% V %*% A
+               	ZVAb = rep(0, N)
+               	ZVAb = createZVAb(N, q, ZVAb, ZVA, Y, b)
+               	p = ilink(XB + ZVAb)
+               	newY = rep(0, N)
+               	u = runif(N)
+               	Y[,1] = samplelatents(N, p, Y, G, newY, u, Se, Sp)
+
+		## Save ##
+		if(t %% thin == 0){
+			Beta[,count] = beta
+			Lambda[,count] = lambda
+			aa[,count] = a
+			vv[,count] = v
+			ww[,count] = w
+			bb[,,count] = b
+			Ses[,count] = Se
+			Sps[,count] = Sp
+			DD[,,count] = V %*% A %*% t(A) %*% V
+			Tau[,count] = tau
+			Psi[,count] = psi
+			if(verbose == TRUE){
+				par(mfrow = c(3,2))
+				plot(Beta[1,1:count])
+				plot(Beta[2,1:count])
+				plot(Beta[3,1:count])
+				plot(Lambda[1,1:count])
+				plot(Lambda[2,1:count])
+				plot(Lambda[3,1:count])
+			}
+			count = count + 1
+		}
+		if(t %% 1000 == 0){print(paste("Sample",t,"out of",iters))}
+	}
+	return(list("beta" = Beta, "lambda" = Lambda, "a" = aa, "v" = vv, "w" = ww, "b" = bb, "se" = Ses, "sp" = Sps, "D" = DD))
+}
