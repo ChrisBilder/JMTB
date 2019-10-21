@@ -34,8 +34,8 @@ data.ind<-data[is.na(pool.id),]
 ##################################################################
 # Creating the design matrices
 
-X.ind<-cbind(1,data.ind[,6:12])
-X.pool<-cbind(1,data.gts[,6:12])
+X.ind<-cbind(1,data.ind[,5:10])
+X.pool<-cbind(1,data.gts[,5:10])
 
 
 ###################################################################
